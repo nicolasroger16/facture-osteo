@@ -379,7 +379,7 @@ async function doShare(){
   try{
     var pdf=buildPDF(),fname="facture-"+current.numero+"-"+current.nom+".pdf";
     var em=current.email||"";
-    var msgText="Bonjour,\n\nVeuillez trouver ci-joint votre note d'honoraires suite \u00e0 votre s\u00e9ance d'ost\u00e9opathie du "+fd(current.dateSeance)+".\n\nBien \u00e0 vous,\nNicolas Roger\nOst\u00e9opathe D.O.";
+    var msgText="Bonjour,\n\nVeuillez trouver ci-joint votre note d'honoraires suite \u00e0 votre s\u00e9ance d'ost\u00e9opathie du "+fd(current.dateSeance)+".\n\nSuite \u00e0 votre s\u00e9ance, et pour en renforcer les b\u00e9n\u00e9fices, je vous propose un programme de mobilit\u00e9 personnalis\u00e9 \u2014 une courte s\u00e9ance quotidienne ou tri-hebdomadaire selon votre cas. Vous trouverez tous les d\u00e9tails, ainsi que les \u00e9l\u00e9ments pour recevoir ce programme personnalis\u00e9 \u00e0 la maison, sur mon site \u00e0 la rubrique MoveCheck : nicolasrogerosteo.netlify.app\n\nBien \u00e0 vous,\nNicolas Roger\nOst\u00e9opathe D.O.";
     var blob=pdf.output("blob"),file=new File([blob],fname,{type:"application/pdf"});
     if(navigator.share&&navigator.canShare&&navigator.canShare({files:[file]})){
       // Copier l'email dans le presse-papier avant d'ouvrir le partage
