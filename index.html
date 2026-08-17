@@ -72,6 +72,7 @@ tr.annulee-row td:last-child{text-decoration:none;}
 @media(max-width:500px){.g2{grid-template-columns:1fr;}.ih{flex-direction:column;gap:10px;}.idate{text-align:left;}#inv{padding:20px 16px;}}
 </style>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 </head>
 <body>
 <div class="hdr">
@@ -125,6 +126,7 @@ tr.annulee-row td:last-child{text-decoration:none;}
       <button class="bsec" onclick="sv('history')">Historique</button>
     </div>
     <button class="bemail" onclick="doShare()">&#x2709;&#xFE0F; Envoyer la facture par email</button>
+    <div id="sharestatus" style="text-align:center;font-size:12px;color:#888;margin-top:6px;"></div>
     <button class="bpdf" onclick="doDownload()">&#x2B07;&#xFE0F; T&#233;l&#233;charger le PDF</button>
     <div id="inv"></div>
   </div>
@@ -167,11 +169,23 @@ function load(){
 }
 
 var GOOGLE_CLIENT_ID="883450194315-q5id1s1poskcal968ff3de5sr102sa58.apps.googleusercontent.com";
-var DRIVE_SCOPE="https://www.googleapis.com/auth/drive.appdata";
+var DRIVE_SCOPE="https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file";
 var DRIVE_FILE_NAME="factures-sync.json";
 var driveTokenClient=null, driveAccessToken=null, driveFileId=null;
 try{driveFileId=localStorage.getItem("driveFileId")||null;}catch(e){}
 var driveSyncTimer=null;
+
+var EMAILJS_PUBLIC_KEY="ok5wRBdI6QTAaCdhZ";
+var EMAILJS_SERVICE_ID="service_tdhtjgd";
+var EMAILJS_TEMPLATE_ID="template_d7rgghm";
+var emailjsReady=false;
+function initEmailJS(){
+  if(emailjsReady)return;
+  if(typeof emailjs==="undefined"){setTimeout(initEmailJS,300);return;}
+  if(EMAILJS_PUBLIC_KEY.indexOf("YOUR_EMAILJS")===0)return;
+  emailjs.init({publicKey:EMAILJS_PUBLIC_KEY});
+  emailjsReady=true;
+}
 
 function mergeIncoming(list, incomingNextNum){
   var existingIds=invoices.map(function(x){return x.id;});
@@ -248,6 +262,35 @@ function driveUpload(data){
     body:body
   }).then(function(r){return r.json();}).then(function(d){
     if(d.id){driveFileId=d.id;try{localStorage.setItem("driveFileId",driveFileId);}catch(e){}}
+  });
+}
+
+function uploadInvoiceToDrive(blob, fname){
+  return new Promise(function(resolve,reject){
+    var reader=new FileReader();
+    reader.onload=function(){
+      var base64=reader.result.split(",")[1];
+      var metadata={name:fname,mimeType:"application/pdf"};
+      var boundary="-------invoicepdf";
+      var body="--"+boundary+"\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"+JSON.stringify(metadata)+
+        "\r\n--"+boundary+"\r\nContent-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n"+base64+"\r\n--"+boundary+"--";
+      fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",{
+        method:"POST",
+        headers:{Authorization:"Bearer "+driveAccessToken,"Content-Type":"multipart/related; boundary="+boundary},
+        body:body
+      }).then(function(r){return r.json();}).then(function(d){
+        if(!d.id){reject(new Error("Upload Drive \u00e9chou\u00e9"));return;}
+        fetch("https://www.googleapis.com/drive/v3/files/"+d.id+"/permissions",{
+          method:"POST",
+          headers:{Authorization:"Bearer "+driveAccessToken,"Content-Type":"application/json"},
+          body:JSON.stringify({role:"reader",type:"anyone"})
+        }).then(function(){
+          resolve("https://drive.google.com/file/d/"+d.id+"/view");
+        }).catch(reject);
+      }).catch(reject);
+    };
+    reader.onerror=reject;
+    reader.readAsDataURL(blob);
   });
 }
 
@@ -375,44 +418,37 @@ function buildPDF(){
 
 function doDownload(){try{buildPDF().save("facture-"+current.numero+"-"+current.nom+".pdf");}catch(e){alert("Erreur : "+e.message);}}
 
-async function doShare(){
-  try{
-    var pdf=buildPDF(),fname="facture-"+current.numero+"-"+current.nom+".pdf";
-    var em=current.email||"";
-    var msgText="Bonjour,\n\nVeuillez trouver ci-joint votre note d'honoraires suite \u00e0 votre s\u00e9ance d'ost\u00e9opathie du "+fd(current.dateSeance)+".\n\nSuite \u00e0 votre s\u00e9ance, et pour en renforcer les b\u00e9n\u00e9fices, je vous propose un programme de mobilit\u00e9 personnalis\u00e9 \u2014 une courte s\u00e9ance quotidienne ou tri-hebdomadaire selon votre cas. Vous trouverez tous les d\u00e9tails, ainsi que les \u00e9l\u00e9ments pour recevoir ce programme personnalis\u00e9 \u00e0 la maison, sur mon site \u00e0 la rubrique MoveCheck : nicolasrogerosteo.netlify.app\n\nBien \u00e0 vous,\nNicolas Roger\nOst\u00e9opathe D.O.";
-    var blob=pdf.output("blob"),file=new File([blob],fname,{type:"application/pdf"});
-    if(navigator.share&&navigator.canShare&&navigator.canShare({files:[file]})){
-      // Copier l'email dans le presse-papier avant d'ouvrir le partage
-      if(em&&navigator.clipboard){
-        try{await navigator.clipboard.writeText(em);}catch(ce){}
-      }
-      // Afficher le bandeau avec l'email
-      if(em) showEmailBanner(em);
-      await navigator.share({
-        files:[file],
-        title:"Note d'honoraires - "+current.civilite+" "+current.prenom+" "+current.nom,
-        text:msgText
-      });
-    } else {
-      pdf.save(fname);
-      var subj=encodeURIComponent("Note d'honoraires - "+fd(current.dateSeance));
-      var body=encodeURIComponent(msgText);
-      setTimeout(function(){window.location.href="mailto:"+em+"?subject="+subj+"&body="+body;},600);
-    }
-  }catch(e){if(e.name!=="AbortError")alert("Erreur : "+e.message);}
+function shareStatus(txt){
+  var el=document.getElementById("sharestatus");
+  if(el)el.textContent=txt;
 }
 
-function showEmailBanner(em){
-  var old=document.getElementById("emailbanner");if(old)old.remove();
-  var d=document.createElement("div");
-  d.id="emailbanner";
-  d.innerHTML="<div style='font-size:22px;margin-bottom:6px'>&#x2709;&#xFE0F;</div>"
-    +"<div style='font-size:13px;color:#555;margin-bottom:4px'>Email du patient copi\u00e9 dans le presse-papier :</div>"
-    +"<div style='font-size:17px;color:#1a3a4a;font-weight:bold;background:#e8f4e8;padding:8px 14px;border-radius:8px;margin:6px 0 10px;letter-spacing:0.3px'>"+em+"</div>"
-    +"<div style='font-size:12px;color:#777;line-height:1.6'>Dans Gmail &rarr; appuyez sur le champ <strong>\u00ab&nbsp;\u00c0&nbsp;\u00bb</strong><br>puis <strong>Appui long &rarr; Coller</strong></div>"
-    +"<button onclick=\"document.getElementById('emailbanner').remove()\" style='margin-top:12px;padding:7px 20px;background:#1a3a4a;color:white;border:none;border-radius:8px;font-family:Georgia,serif;font-size:13px;cursor:pointer'>OK</button>";
-  d.style.cssText="position:fixed;bottom:0;left:0;right:0;background:white;border-top:3px solid #27ae60;padding:20px;font-family:Georgia,serif;text-align:center;box-shadow:0 -4px 24px rgba(0,0,0,0.18);z-index:9999;";
-  document.body.appendChild(d);
+async function doShare(){
+  var em=current.email||"";
+  if(!em){alert("Cette facture n'a pas d'email associé.");return;}
+  if(!driveAccessToken){alert("Merci de d'abord cliquer sur « Connecter Google Drive » dans l'onglet Historique.");return;}
+  initEmailJS();
+  if(!emailjsReady){alert("Envoi par email pas encore configuré.");return;}
+  try{
+    shareStatus("Génération du PDF...");
+    var pdf=buildPDF(),fname="facture-"+current.numero+"-"+current.nom+".pdf";
+    pdf.save(fname);
+    var blob=pdf.output("blob");
+
+    shareStatus("Envoi de la facture vers Drive...");
+    var link=await uploadInvoiceToDrive(blob,fname);
+
+    shareStatus("Envoi de l'email...");
+    await emailjs.send(EMAILJS_SERVICE_ID,EMAILJS_TEMPLATE_ID,{
+      to_email:em,
+      session_date:fd(current.dateSeance),
+      invoice_link:link
+    });
+    shareStatus("Email envoyé ✅");
+  }catch(e){
+    shareStatus("");
+    alert("Erreur lors de l'envoi : "+e.message);
+  }
 }
 
 function renderHistory(){
