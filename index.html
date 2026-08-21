@@ -171,9 +171,34 @@ function load(){
 var GOOGLE_CLIENT_ID="883450194315-q5id1s1poskcal968ff3de5sr102sa58.apps.googleusercontent.com";
 var DRIVE_SCOPE="https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file";
 var DRIVE_FILE_NAME="factures-sync.json";
-var driveTokenClient=null, driveAccessToken=null, driveFileId=null;
-try{driveFileId=localStorage.getItem("driveFileId")||null;}catch(e){}
-var driveSyncTimer=null;
+var driveTokenClient=null, driveAccessToken=null, driveFileId=null, driveTokenExpiry=0;
+try{
+  driveFileId=localStorage.getItem("driveFileId")||null;
+  driveAccessToken=localStorage.getItem("driveAccessToken")||null;
+  driveTokenExpiry=parseInt(localStorage.getItem("driveTokenExpiry")||"0",10);
+}catch(e){}
+var driveSyncTimer=null, driveRefreshTimer=null;
+
+function saveDriveToken(token,expiresInSeconds){
+  driveAccessToken=token;
+  driveTokenExpiry=Date.now()+(expiresInSeconds*1000);
+  try{
+    localStorage.setItem("driveAccessToken",token);
+    localStorage.setItem("driveTokenExpiry",String(driveTokenExpiry));
+  }catch(e){}
+}
+
+function driveTokenValid(){
+  return driveAccessToken && driveTokenExpiry>Date.now()+120000; // marge de 2 min
+}
+
+function scheduleDriveRefresh(expiresInSeconds){
+  clearTimeout(driveRefreshTimer);
+  var delay=Math.max((expiresInSeconds-300)*1000,60000); // renouvelle 5 min avant expiration
+  driveRefreshTimer=setTimeout(function(){
+    if(driveTokenClient)driveTokenClient.requestAccessToken({prompt:""});
+  },delay);
+}
 
 var EMAILJS_PUBLIC_KEY="ok5wRBdI6QTAaCdhZ";
 var EMAILJS_SERVICE_ID="service_tdhtjgd";
@@ -212,13 +237,23 @@ function initDriveClient(){
     client_id:GOOGLE_CLIENT_ID,
     scope:DRIVE_SCOPE,
     callback:function(resp){
-      if(resp.error){updateDriveStatus("Connexion refus\u00e9e");return;}
-      driveAccessToken=resp.access_token;
+      if(resp.error){if(!driveTokenValid())updateDriveStatus("Connexion refus\u00e9e");return;}
+      saveDriveToken(resp.access_token,resp.expires_in||3600);
+      scheduleDriveRefresh(resp.expires_in||3600);
       updateDriveStatus("Connect\u00e9 \u2705 synchronisation...");
       syncWithDrive();
     }
   });
-  driveTokenClient.requestAccessToken({prompt:""});
+
+  // Si un jeton valide est d\u00e9j\u00e0 en m\u00e9moire (reprise entre deux patients),
+  // on synchronise imm\u00e9diatement sans repasser par Google.
+  if(driveTokenValid()){
+    updateDriveStatus("Connect\u00e9 \u2705 synchronisation...");
+    syncWithDrive();
+    scheduleDriveRefresh(Math.round((driveTokenExpiry-Date.now())/1000));
+  }else{
+    driveTokenClient.requestAccessToken({prompt:""});
+  }
 }
 
 function signInDrive(){
