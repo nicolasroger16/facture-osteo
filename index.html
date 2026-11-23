@@ -169,7 +169,8 @@ function load(){
 }
 
 var GOOGLE_CLIENT_ID="883450194315-q5id1s1poskcal968ff3de5sr102sa58.apps.googleusercontent.com";
-var DRIVE_SCOPE="https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file";
+var GMAIL_SCOPE="https://www.googleapis.com/auth/gmail.send";
+var DRIVE_SCOPE="https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file "+GMAIL_SCOPE;
 var DRIVE_FILE_NAME="factures-sync.json";
 var driveTokenClient=null, driveAccessToken=null, driveFileId=null, driveTokenExpiry=0;
 try{
@@ -239,6 +240,7 @@ function initDriveClient(){
     callback:function(resp){
       if(resp.error){if(!driveTokenValid())updateDriveStatus("Connexion refus\u00e9e");return;}
       saveDriveToken(resp.access_token,resp.expires_in||3600);
+      try{localStorage.setItem("googleScopes",resp.scope||"");}catch(e){}
       scheduleDriveRefresh(resp.expires_in||3600);
       updateDriveStatus("Connect\u00e9 \u2705 synchronisation...");
       syncWithDrive();
@@ -458,27 +460,134 @@ function shareStatus(txt){
   if(el)el.textContent=txt;
 }
 
+function hasGmailScope(){
+  try{return (localStorage.getItem("googleScopes")||"").indexOf(GMAIL_SCOPE)>=0;}catch(e){return false;}
+}
+
+function b64utf8(str){return btoa(unescape(encodeURIComponent(str)));}
+function mimeWord(str){return "=?UTF-8?B?"+b64utf8(str)+"?=";}
+function wrap76(b64){return b64.replace(/(.{76})/g,"$1\r\n");}
+function escHtml(t){return String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+function blobToBase64(blob){
+  return new Promise(function(resolve,reject){
+    var r=new FileReader();
+    r.onload=function(){resolve(r.result.split(",")[1]);};
+    r.onerror=reject;
+    r.readAsDataURL(blob);
+  });
+}
+
+function invoiceMailContent(inv){
+  var civ={"M.":"Monsieur","Mme":"Madame","Dr":"Docteur"}[inv.civilite]||"";
+  var salut="Bonjour"+(civ?" "+civ+" "+inv.nom:(inv.prenom?" "+inv.prenom:""))+",";
+  var paras=[
+    salut,
+    "Veuillez trouver ci-joint votre note d'honoraires pour votre séance d'ostéopathie du "+fd(inv.dateSeance)+".",
+    "Si vous souhaitez prolonger les bénéfices de la séance à la maison, je propose aussi des programmes de mobilité personnalisés, présentés sur mon site : https://nicolasrogerosteopathe.com",
+    "Je reste à votre disposition pour toute question."
+  ];
+  var sig=["Bien à vous,","",NOMINV,"Ostéopathe D.O.",ADR,VILLE,"Tél. : "+TEL,"N° Adeli : "+ADELI];
+  var text=paras.join("\r\n\r\n")+"\r\n\r\n"+sig.join("\r\n")+"\r\n";
+  var html="<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;line-height:1.5\">"+
+    paras.map(function(p){return "<p>"+escHtml(p).replace("https://nicolasrogerosteopathe.com","<a href=\"https://nicolasrogerosteopathe.com\">nicolasrogerosteopathe.com</a>")+"</p>";}).join("")+
+    "<p>"+sig.filter(function(l){return l!=="";}).map(escHtml).join("<br>")+"</p></div>";
+  return {
+    subject:"Votre note d'honoraires – séance du "+fd(inv.dateSeance),
+    text:text,
+    html:html
+  };
+}
+
+async function sendInvoiceWithGmail(inv,pdfBlob,fname){
+  var c=invoiceMailContent(inv);
+  var pdf64=await blobToBase64(pdfBlob);
+  var safeName=fname.normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Za-z0-9._-]/g,"_");
+  var mixed="mixed_"+Date.now(),alt="alt_"+Date.now();
+  var raw=[
+    "To: "+inv.email,
+    "Subject: "+mimeWord(c.subject),
+    "MIME-Version: 1.0",
+    "Content-Type: multipart/mixed; boundary=\""+mixed+"\"",
+    "",
+    "--"+mixed,
+    "Content-Type: multipart/alternative; boundary=\""+alt+"\"",
+    "",
+    "--"+alt,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(b64utf8(c.text)),
+    "--"+alt,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(b64utf8(c.html)),
+    "--"+alt+"--",
+    "--"+mixed,
+    "Content-Type: application/pdf; name=\""+safeName+"\"",
+    "Content-Disposition: attachment; filename=\""+safeName+"\"",
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(pdf64),
+    "--"+mixed+"--",
+    ""
+  ].join("\r\n");
+  var rawUrl=btoa(raw).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+  var r=await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send",{
+    method:"POST",
+    headers:{Authorization:"Bearer "+driveAccessToken,"Content-Type":"application/json"},
+    body:JSON.stringify({raw:rawUrl})
+  });
+  if(!r.ok){
+    var t=await r.text();
+    var err=new Error("Gmail "+r.status+" : "+t.slice(0,300));
+    err.status=r.status;err.body=t;
+    throw err;
+  }
+}
+
+async function sendInvoiceWithEmailJS(inv,blob,fname){
+  initEmailJS();
+  if(!emailjsReady)throw new Error("Envoi par email pas encore configuré.");
+  shareStatus("Envoi de la facture vers Drive...");
+  var link=await uploadInvoiceToDrive(blob,fname);
+  shareStatus("Envoi de l'email...");
+  await emailjs.send(EMAILJS_SERVICE_ID,EMAILJS_TEMPLATE_ID,{
+    to_email:inv.email,
+    session_date:fd(inv.dateSeance),
+    invoice_link:link
+  });
+}
+
 async function doShare(){
   var em=current.email||"";
   if(!em){alert("Cette facture n'a pas d'email associé.");return;}
-  if(!driveAccessToken){alert("Merci de d'abord cliquer sur « Connecter Google Drive » dans l'onglet Historique.");return;}
-  initEmailJS();
-  if(!emailjsReady){alert("Envoi par email pas encore configuré.");return;}
+  if(!driveAccessToken||!driveTokenValid()){alert("Merci de d'abord cliquer sur « Connecter Google Drive » dans l'onglet Historique.");return;}
+  if(!hasGmailScope()){
+    alert("Une seule fois : Google va te demander l'autorisation d'envoyer les factures depuis ton Gmail. Accepte, puis reclique sur « Envoyer la facture par email ».");
+    if(driveTokenClient)driveTokenClient.requestAccessToken({prompt:"consent"});
+    return;
+  }
   try{
     shareStatus("Génération du PDF...");
     var pdf=buildPDF(),fname="facture-"+current.numero+"-"+current.nom+".pdf";
     pdf.save(fname);
     var blob=pdf.output("blob");
-
-    shareStatus("Envoi de la facture vers Drive...");
-    var link=await uploadInvoiceToDrive(blob,fname);
-
-    shareStatus("Envoi de l'email...");
-    await emailjs.send(EMAILJS_SERVICE_ID,EMAILJS_TEMPLATE_ID,{
-      to_email:em,
-      session_date:fd(current.dateSeance),
-      invoice_link:link
-    });
+    shareStatus("Envoi de l'email avec la facture en pièce jointe...");
+    try{
+      await sendInvoiceWithGmail(current,blob,fname);
+    }catch(gErr){
+      if(gErr.status===401){
+        try{localStorage.removeItem("googleScopes");}catch(e){}
+        shareStatus("");
+        alert("La connexion Google a expiré. Reconnecte Google Drive puis renvoie la facture.");
+        return;
+      }
+      if(confirm("L'envoi direct par Gmail n'a pas fonctionné :\n"+gErr.message+"\n\nEnvoyer quand même avec l'ancien système (lien Drive) ?")){
+        await sendInvoiceWithEmailJS(current,blob,fname);
+      }else{shareStatus("");return;}
+    }
     shareStatus("Email envoyé ✅");
   }catch(e){
     shareStatus("");
